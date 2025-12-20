@@ -1,0 +1,13 @@
+[package]
+name = "Aura"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chrono = "0.4.42"
+log = "0.4.29"
+mio={ version="1.1.0", features=["os-poll", "net"] }
+rustix-uring = "0.6.0"
+
+[dev-dependencies]
+env_logger = "0.11.8" 
