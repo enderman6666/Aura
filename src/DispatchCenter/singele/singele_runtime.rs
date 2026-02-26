@@ -461,7 +461,7 @@ mod tests{
             setup_logger(LevelFilter::Trace);
             let string = "hello world".to_string();
             let string_bytes = string.as_bytes().to_vec();
-            let ip = "112.126.94.134:6666".parse().unwrap();
+            let ip = "192.168.31.108:6666".parse().unwrap();
             SingeleRuntime::run(async move{
                 use futures::StreamExt;
                 let stream = if let Ok(stream) = SingeleRuntime::TcpStream(ip).await{
@@ -485,7 +485,7 @@ mod tests{
         fn test_singele_runtime_udp_send(){
             setup_logger(LevelFilter::Trace);
             let ip = "0.0.0.0:8080".parse().unwrap();
-            let sip = "112.126.94.134:6666".parse().unwrap();
+            let sip = "192.168.31.108:6666".parse().unwrap();
             let string = "hello world".to_string();
             let string_bytes = string.as_bytes().to_vec();
             SingeleRuntime::run(async move{
