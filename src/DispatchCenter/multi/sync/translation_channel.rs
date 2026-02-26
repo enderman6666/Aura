@@ -3,7 +3,7 @@ use crate::GeneralComponents::lock_free::{
     atomic_queue::{AtomicQueue},
     error::QueueError,
 };
-use futures::{stream::Stream,Sink};
+use futures::{stream::Stream,Sink,SinkExt};
 use std::{
     sync::{Arc},
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},

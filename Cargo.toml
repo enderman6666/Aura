@@ -2,6 +2,13 @@
 name = "Aura"
 version = "0.1.0"
 edition = "2024"
+authors = ["enderman <2757482051@qq.com>"]
+description ="一个基于rust的异步框架"
+license="Apache-2.0"
+repository="https://github.com/enderman6666/Aura"
+documentation = "https://docs.rs/Aura"
+readme = "README.md"
+keywords=["Aura", "异步框架"]
 
 [dependencies]
 dashmap = "5.4"
