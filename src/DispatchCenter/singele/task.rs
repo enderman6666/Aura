@@ -12,6 +12,7 @@ thread_local!{
     static TASKID: RefCell<i64> = RefCell::new(0);
 }
 
+// 任务结构体,用于存储异步任务的信息
 pub struct Task{
     pub id: i64,
     future:Rc<RefCell<Option<Pin<Box<dyn Future<Output = ()>>>>>>,

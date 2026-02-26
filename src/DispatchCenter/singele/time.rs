@@ -9,10 +9,6 @@ use std::{
 use crate::GeneralComponents::time::time_wheel::TimeWheel;
 use log::debug;
 
-thread_local!{
-    static TIME_WHEEL: RefCell<Option<Rc<RefCell<TimeWheel>>>> = RefCell::new(None);
-}
-
 
 pub enum Either<L, R>{
     Left(L),
@@ -80,25 +76,14 @@ pub struct Sleep{
 }
 
 impl Sleep{
-    pub fn new(duration: Duration) -> Self{
-        TIME_WHEEL.with(|time_wheel|{
-            let mut time_wheel = time_wheel.borrow_mut();
-            if time_wheel.is_none(){
-                time_wheel.replace(Rc::new(RefCell::new(TimeWheel::new(Duration::from_micros(20)))));
-            }
-        });
-        let time_wheel = TIME_WHEEL.with(|time_wheel|{
-            time_wheel.borrow_mut().as_mut().unwrap().clone()
-        });
+    pub fn new(duration: Duration, time_wheel: Rc<RefCell<TimeWheel>>) -> Self{
         let sleep=Sleep{
             waker: None,
             duration,
             start_time: Instant::now(),
-            time_wheel: TIME_WHEEL.with(|time_wheel|{
-                time_wheel.borrow_mut().as_mut().unwrap().clone()
-            }),
+            time_wheel: time_wheel.clone(),
         };
-        let _=time_wheel.borrow_mut().add_task(sleep.start_time , sleep.duration);
+        debug!("创建新任务,等待时间: {:?}", sleep.duration);
         sleep
     }
 }
@@ -110,11 +95,7 @@ impl Future for Sleep{
             Poll::Ready(())
         } else {
             self.waker = Some(cx.waker().clone());
-            let time_wheel = &self.time_wheel;
-            let waker = time_wheel.borrow_mut().take_waker();
-            if let Some(waker) = waker{
-                waker.wake();
-            }
+            let _=self.time_wheel.borrow_mut().add_task(self.start_time , self.duration, Some(cx.waker().clone()));
             Poll::Pending
         }
     }

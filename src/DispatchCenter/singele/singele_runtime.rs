@@ -6,6 +6,8 @@ use std::{
     task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
     time::Duration as StdDuration,
     thread::sleep,
+    net::SocketAddr,
+    io::{self,ErrorKind},
 };
 use chrono::Duration;
 use log::{info,debug,trace,error,warn};
@@ -14,14 +16,16 @@ use super::{
     join_handle::JoinHandle,
     time::*,
 };
-use crate::GeneralComponents::time::time_wheel::TimeWheel;    
-
+use mio::net::TcpStream;
+use crate::{DispatchCenter::singele::singele_runtime, GeneralComponents::time::time_wheel::TimeWheel};    
+use super::net::{tcp::{TcpServer,TcpConnet,TcpConnectFuture},udp::UdpHandeler,evenloop::EventLoop,stream};
+use super::file::{window::evenloop::WinFileCenter,FileCenter,window::winfile::WinFile};
 
 thread_local!{
     static SINGLE_RUNTIME: RefCell<Option<Rc<SingeleRuntime>>> = RefCell::new(None);
-    static TIME_WHEEL: RefCell<Option<Rc<RefCell<TimeWheel>>>> = RefCell::new(None);
 }
 
+// 单线程运行时,用于管理异步任务
 pub struct SingeleRuntime{
     prepare_tasks:Rc<RefCell<Vec<Pin<Box<dyn Future<Output = ()>>>>>>,// 准备任务id队列
     start_tasks:Rc<RefCell<Vec<i64>>>,// 启动任务id队列
@@ -29,10 +33,12 @@ pub struct SingeleRuntime{
     ready_futures:Rc<RefCell<VecDeque<i64>>>,// 就绪任务id队列
     clear_tasks:RefCell<Vec<i64>>,// 清除任务id队列
     tasks:Rc<RefCell<HashMap<i64, Rc<RefCell<Task>>>>>,// 任务id到任务的映射
-    
+    handle_list:(Rc<RefCell<TimeWheel>>,Rc<RefCell<EventLoop>>,Rc<RefCell<dyn FileCenter>>),// 监听器元组
 }
 impl SingeleRuntime{
     fn new() -> Self{
+        #[cfg(target_os = "windows")]
+        {let file_center = Rc::new(RefCell::new(WinFileCenter::new()));
         Self{
             prepare_tasks: Rc::new(RefCell::new(Vec::new())),// 准备生成任务队列
             start_tasks: Rc::new(RefCell::new(Vec::new())),// 启动任务id队列
@@ -40,20 +46,32 @@ impl SingeleRuntime{
             ready_futures: Rc::new(RefCell::new(VecDeque::new())),// 就绪任务id队列
             clear_tasks: RefCell::new(Vec::new()),// 清除任务id队列
             tasks: Rc::new(RefCell::new(HashMap::new())),// 任务id到任务的映射
-        }
+            handle_list: (
+                Rc::new(RefCell::new(TimeWheel::new(StdDuration::from_micros(100)))),
+                Rc::new(RefCell::new(EventLoop::new())),
+                file_center,
+            ),// 监听器元组
+        }}
     }
 
-    pub fn run(future: impl Future<Output = ()>+ 'static){
-        debug!("开始初始化SingeleRuntime");
-        SINGLE_RUNTIME.with(|slot|{
-            let mut slot = slot.borrow_mut();
-            if slot.is_none() {
-                slot.replace(Rc::new(SingeleRuntime::new()));
+    // 获取当前线程的运行时实例
+    pub fn get_runtime() -> Rc<SingeleRuntime>{
+        SINGLE_RUNTIME.with(|runtime|{
+            let mut runtime_b = runtime.borrow_mut();
+            if runtime_b.is_none(){
+                runtime_b.replace(Rc::new(SingeleRuntime::new()));
             }
         });
-        let runtime = SINGLE_RUNTIME.with(|slot|{
-            slot.borrow_mut().as_mut().unwrap().clone()
+        let runtime = SINGLE_RUNTIME.with(|runtime|{
+            runtime.borrow_mut().as_ref().unwrap().clone()
         });
+        runtime
+    }
+
+    // 运行异步任务，可直接使用
+    pub fn run(future: impl Future<Output = ()>+ 'static){
+        debug!("开始初始化SingeleRuntime");
+        let runtime = Self::get_runtime();
         debug!("SingeleRuntime初始化完成");
         debug!("添加初始任务到prepare_tasks队列");
         runtime.prepare_tasks.borrow_mut().push(Box::pin(future));
@@ -71,7 +89,6 @@ impl SingeleRuntime{
                 debug!("tasks映射为空，退出循环");
                 break;
             }
-            
             // 处理新添加的任务（来自spawn方法）
             if !runtime.prepare_tasks.borrow().is_empty(){
                 debug!("处理prepare_tasks队列中的任务");
@@ -118,7 +135,8 @@ impl SingeleRuntime{
             }
             debug!("检查就绪任务队列");
             // 处理就绪任务
-            while let Some(task_id) = runtime.ready_futures.borrow_mut().pop_front(){
+            let ready_tasks: Vec<i64> = runtime.ready_futures.borrow_mut().drain(..).collect();
+            for task_id in ready_tasks {
                 debug!("处理就绪任务: {}", task_id);
                 let taskmap = runtime.tasks.borrow();
                 let task = taskmap.get(&task_id).unwrap().borrow_mut();
@@ -139,6 +157,14 @@ impl SingeleRuntime{
                     }
                 }
             }
+            let mut timewheel = runtime.handle_list.0.borrow_mut();
+            if !timewheel.is_empty(){
+                timewheel.poll();
+            }
+            let mut single_center = runtime.handle_list.1.borrow_mut();
+            let _ = single_center.poll();
+            let mut file_center = runtime.handle_list.2.borrow_mut();
+            file_center.poll();
             debug!("等待列队任务数量: {}", runtime.waitting_futures.borrow().len());
             debug!("就绪任务队列任务数量: {}", runtime.ready_futures.borrow().len());
             // 清除就绪任务
@@ -155,10 +181,12 @@ impl SingeleRuntime{
             if runtime.ready_futures.borrow().is_empty()&&runtime.start_tasks.borrow().is_empty(){
                 sleep(StdDuration::from_micros(100));
                 debug!("等待队列已空,共计循环{}次",cont_times);
+                
             }
         }
     }
 
+    // 创建新任务,并添加到任务映射中
     fn task(&self, future: impl Future<Output = ()>+ 'static)->i64{
         debug!("创建新任务");
         let task = Rc::new(RefCell::new(Task::new(Box::pin(future))));
@@ -171,13 +199,7 @@ impl SingeleRuntime{
 
     // 创建新任务并添加到等待队列
     pub fn spawn<T:'static>(future: impl Future<Output = T>+ 'static)->JoinHandle<T>{
-        let runtime = SINGLE_RUNTIME.with(|runtime|{
-            if let Some(runtime) = runtime.borrow().as_ref(){
-                Rc::clone(runtime)
-            }else{
-                panic!("单例运行时不存在");
-            }
-        });
+        let runtime = Self::get_runtime();
         let output = Rc::new(RefCell::new(Output::new()));
         let output_clone = Rc::clone(&output);
         let result=async move{
@@ -192,17 +214,9 @@ impl SingeleRuntime{
         JoinHandle::new(output)
     }
 
-    // 运行所有任务
+    // 批量运行所有任务
     pub fn run_all(futures: Vec<Pin<Box<dyn Future<Output = ()>+ 'static>>>){
-        SINGLE_RUNTIME.with(|runtime|{
-            let mut runtime_b = runtime.borrow_mut();
-            if runtime_b.is_none(){
-                runtime_b.replace(Rc::new(SingeleRuntime::new()));
-            }
-        });
-        let runtime = SINGLE_RUNTIME.with(|runtime|{
-            runtime.borrow_mut().as_ref().unwrap().clone()
-        });
+        let runtime = Self::get_runtime();
         for future in futures{
             runtime.prepare_tasks.borrow_mut().push(future);
         }
@@ -213,7 +227,9 @@ impl SingeleRuntime{
 
     // 等待指定时间
     pub fn sleep(duration: StdDuration) -> Sleep{
-        Sleep::new(duration)
+        let runtime = Self::get_runtime();
+        let timewheel = Rc::clone(&runtime.handle_list.0);
+        Sleep::new(duration, timewheel)
     }
 
     // 两个future同时执行,返回先完成的结果
@@ -232,8 +248,39 @@ impl SingeleRuntime{
         self.waitting_futures.borrow_mut().retain(|id| *id != task_id);
     }
 
+    // 创建一个TCP监听器
+    pub fn TcpListener(ip: SocketAddr) -> Result<TcpServer, io::Error>{
+        let eventloop = Rc::clone(&SingeleRuntime::get_runtime().handle_list.1);
+        TcpServer::new(ip, eventloop)
+    }
+
+    // 创建一个UDP套接字
+    pub fn UdpSocket(ip: SocketAddr) -> Result<UdpHandeler, io::Error>{
+        let eventloop = Rc::clone(&SingeleRuntime::get_runtime().handle_list.1);
+        UdpHandeler::new(ip, eventloop)
+    }
+
+    // 创建一个主动连接的TCP连接
+    pub async fn TcpStream(addr:SocketAddr) -> Result<TcpConnet,std::io::Error>{
+        let eventloop = Rc::clone(&SingeleRuntime::get_runtime().handle_list.1);
+        TcpConnet::build(addr,eventloop).await
+    }
+
+    // 从Tcp监听器返回一个TCP连接创建
+    pub fn TcpConnet(socket: Rc<RefCell<TcpStream>>) -> TcpConnet{
+        let eventloop = Rc::clone(&SingeleRuntime::get_runtime().handle_list.1);
+        TcpConnet::new(socket, eventloop)
+    }
+
+    pub fn file(path:&str)->windows::core::Result<WinFile>{
+        let singele_runtime=SingeleRuntime::get_runtime();
+        let file_center = Rc::clone(&singele_runtime.handle_list.2);
+        WinFile::new(file_center,path)
+    }
+
 }
 
+// 自定义Waker，用于单线程环境下的任务唤醒
 pub struct SingelWaker {
     runtime: Weak<SingeleRuntime>,
     task_id:i64,
@@ -262,11 +309,15 @@ impl SingelWaker{
 unsafe fn wake_internal(waker: &SingelWaker) {
     if let Some(runtime) = waker.runtime.upgrade() {
         let task_id = waker.task_id;
-        if runtime.waitting_futures.borrow().iter().any(|id| *id == task_id){
-            runtime.ready_futures.borrow_mut().push_back(task_id);
-            runtime.waitting_futures.borrow_mut().retain(|id| *id != task_id);
+        // 同时获取两个可变借用，避免重入问题
+        let mut ready_futures = runtime.ready_futures.borrow_mut();
+        let mut waitting_futures = runtime.waitting_futures.borrow_mut();
+        
+        if waitting_futures.iter().any(|id| *id == task_id){
+            ready_futures.push_back(task_id);
+            waitting_futures.retain(|id| *id != task_id);
         }else{
-            if !runtime.ready_futures.borrow().iter().any(|id| *id == task_id){
+            if !ready_futures.iter().any(|id| *id == task_id){
             log::error!("任务{}未在等待队列和就绪列队中，无法唤醒",waker.task_id);
             }
         }
@@ -313,14 +364,18 @@ mod tests{
     use super::SingeleRuntime;
     mod test_singele_runtime{
         use super::*;
-        use std::{pin::Pin,sync::Once};
+        use std::{
+            pin::Pin,
+            sync::Once,
+            time::Duration,
+        };
         use log::{debug,LevelFilter};
         use env_logger;
 
         fn setup_logger(level:LevelFilter){
             env_logger::Builder::new()
             .filter_level(level) // 主过滤级别
-            .filter_module("Aura", LevelFilter::Trace) // 你的crate用最详细级别
+            .filter_module("aura", LevelFilter::Trace) // 你的crate用最详细级别
             .filter_module("mio", LevelFilter::Warn) // 第三方库只显示警告
             .is_test(true)
             .format_timestamp_nanos() // 高精度时间戳
@@ -385,6 +440,81 @@ mod tests{
                 }),
             ];
             SingeleRuntime::run_all(futures);
+        }
+
+        #[test]
+        fn test_singele_runtime_tcp_listener(){
+            setup_logger(LevelFilter::Trace);
+            let ip = "127.0.0.1:8080".parse().unwrap();
+            let mut listener = SingeleRuntime::TcpListener(ip).unwrap();
+            SingeleRuntime::run(async move{
+                use futures::StreamExt;
+                while let Some(stream) = listener.listen().next().await{
+                    debug!("监听到一个连接，内容为{:?}",stream);
+                    break; // 只处理一个连接就退出测试
+                }
+            });
+        }
+
+        #[test]
+        fn test_singele_runtime_tcp_stream(){
+            setup_logger(LevelFilter::Trace);
+            let string = "hello world".to_string();
+            let string_bytes = string.as_bytes().to_vec();
+            let ip = "112.126.94.134:6666".parse().unwrap();
+            SingeleRuntime::run(async move{
+                use futures::StreamExt;
+                let stream = if let Ok(stream) = SingeleRuntime::TcpStream(ip).await{
+                    stream
+                } else {
+                    panic!("连接失败");
+                };
+                let mut write_stream = stream.write(string_bytes);
+                while let Some(result) = write_stream.next().await {
+                    match result {
+                        Ok(n) => debug!("写入成功，写入了 {} 字节", n),
+                        Err(e) => panic!("写入失败: {:?}", e),
+                    }
+                }
+                // 写入完成
+                debug!("所有数据写入完成");
+            });
+        }
+
+        #[test]
+        fn test_singele_runtime_udp_send(){
+            setup_logger(LevelFilter::Trace);
+            let ip = "0.0.0.0:8080".parse().unwrap();
+            let sip = "112.126.94.134:6666".parse().unwrap();
+            let string = "hello world".to_string();
+            let string_bytes = string.as_bytes().to_vec();
+            SingeleRuntime::run(async move{
+                use futures::StreamExt;
+                let udp = SingeleRuntime::UdpSocket(ip).unwrap();
+                let mut write_stream = udp.write_to(sip,string_bytes);
+                while let Some(result) = write_stream.next().await {
+                    match result {
+                        Ok(n) => debug!("写入成功，写入了 {} 字节", n),
+                        Err(e) => panic!("写入失败: {:?}", e),
+                    }
+                }
+                // 写入完成
+                debug!("所有数据写入完成");
+            });
+        }
+
+        #[test]
+        fn test_singele_runtime_udp_recv(){
+            setup_logger(LevelFilter::Trace);
+            let ip = "0.0.0.0:8080".parse().unwrap();
+            let udp = SingeleRuntime::UdpSocket(ip).unwrap();
+            SingeleRuntime::run(async move{
+                use futures::StreamExt;
+                while let Some(buf) = udp.read().next().await{
+                    debug!("监听到一个连接，内容为{:?}",buf);
+                    break; // 只处理一个连接就退出测试
+                }
+            });
         }
     }
 }

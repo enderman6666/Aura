@@ -11,7 +11,6 @@ pub struct TimeWheel {
     slots: HashMap<Instant, Vec<TimeTask>>,
     slot_duration: StdDuration,
     current_time: Instant,
-    waker:Option<Waker>,
 }
 impl TimeWheel {
     pub fn new(slot_duration: StdDuration) -> Self {
@@ -19,17 +18,19 @@ impl TimeWheel {
             slots: HashMap::new(),
             slot_duration,
             current_time: Instant::now(),
-            waker:None,
         }
     }
 
+    pub fn set_slot_duration(&mut self,slot_duration: StdDuration){
+        self.slot_duration = slot_duration;
+    }
+
     // 添加任务到时间轮
-    pub fn add_task(&mut self,start_time: Instant,time:StdDuration)->Result<(),String>{
+    pub fn add_task(&mut self,start_time: Instant,time:StdDuration,waker: Option<Waker>)->Result<(),String>{
         let end_time = start_time + time;
         if self.current_time <= start_time{
             let duration = (end_time-self.current_time).as_micros();
             let slot_duration = self.slot_duration.as_micros();
-            
             // 防止除以0
             if slot_duration == 0 {
                 return Err("步长时间不能为0".to_string());
@@ -39,33 +40,33 @@ impl TimeWheel {
             let timekey = self.current_time + self.slot_duration * num as u32;
             self.slots.entry(timekey).or_default().push(TimeTask{
                 point:end_time,
-                waker:None,
+                waker,
             });
+            debug!("添加任务,开始时间: {:?},结束时间: {:?},时间槽: {:?}", start_time, end_time, timekey);
             Ok(())
         }else{
             Err("开始时间必须大于当前时间".to_string())
         }
     }
-
     // 模拟时间轮的轮询，使用基准时间与时间步长来计算需要唤醒的时间槽
     // 并从哈希表中移除已唤醒的任务
-    fn poll(&mut self) {
+    pub fn poll(&mut self) {
+        debug!("开始轮询时间轮，任务数量: {:?}", self.slots.len());
         let current_time = Instant::now();
         let time_len = (current_time - self.current_time).as_micros();
         let slot_duration = self.slot_duration.as_micros();
-        
         // 防止除以0
         let num = if slot_duration > 0 {
             time_len / slot_duration
         } else {
             0
         };
-        
         for i in 0..num {
             let time = self.current_time + self.slot_duration * i as u32;
             if let Some(wakers) = self.slots.remove(&time) {
                 for waker in wakers {
                     if let Some(waker) = waker.waker{
+                        debug!("唤醒任务,时间key: {:?}", time);
                         waker.wake();
                     }
                 }
@@ -76,12 +77,14 @@ impl TimeWheel {
             // 收集需要唤醒的任务索引
             let mut to_wake = Vec::new();
             for (i, task) in tasks.iter().enumerate() {
+                debug!("轮询时间轮,任务时间key: {:?},任务索引: {:?}", task.point, i);
                 if task.point <= current_time {
                     to_wake.push(i);
                 }
             }
             // 从后往前唤醒任务并移除，避免索引移位
             for &i in to_wake.iter().rev() {
+                debug!("唤醒任务,索引: {:?}", i);
                 if let Some(waker) = tasks.remove(i).waker {
                     waker.wake();
                 }
@@ -90,23 +93,10 @@ impl TimeWheel {
         self.current_time = self.current_time + self.slot_duration * num as u32;
     }
 
-    pub fn take_waker(&mut self)->Option<Waker>{
-        self.waker.take()
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
     }
-}
 
-impl Future for TimeWheel {
-    type Output = ();
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = Pin::get_mut(self);
-        if this.slots.is_empty(){
-            Poll::Ready(())
-        }else{
-            this.waker = Some(cx.waker().clone());
-            this.poll();
-            Poll::Pending
-        }
-    }
 }
 
 struct TimeTask{

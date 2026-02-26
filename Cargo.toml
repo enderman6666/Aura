@@ -4,10 +4,24 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+dashmap = "5.4"
 chrono = "0.4.42"
+futures = "0.3.31"
 log = "0.4.29"
-mio={ version="1.1.0", features=["os-poll", "net"] }
-rustix-uring = "0.6.0"
-
-[dev-dependencies]
+mio={ version="1.1.0",features=["os-poll", "net"] }
+windows = {version ="0.62.2",features = [
+    "Win32_Foundation",
+    "Win32_System_IO",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+    "Win32_Security",
+]}
 env_logger = "0.11.8" 
+loom = "0.7"
+
+[profile.release]
+debug = true  # 启用调试符号，但不会优化掉
+
+
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
