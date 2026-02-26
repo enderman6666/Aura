@@ -211,10 +211,8 @@ impl Runtime{
                         let mut tasks = self.tasks.borrow_mut();
                         let task = tasks.get_mut(&id).unwrap();
                         let future = task.future();
-                        let muxwaker=MutexWaker::new(id, self.id);
-                        let waker = Arc::new(muxwaker);
-                        let waker = waker.clone();
-                        let waker = Waker::from(waker);
+                        let waker=Arc::new(MutexWaker::new(id, self.id));
+                        let waker = Waker::from(waker.clone());
                         let mut cx=Context::from_waker(&waker);
                         match future.borrow_mut().as_mut(){
                             Some(future) => {

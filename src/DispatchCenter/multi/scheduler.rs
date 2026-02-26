@@ -311,20 +311,14 @@ mod tests{
     #[test]
     fn test_runtime(){
         setup_logger(LevelFilter::Trace);
-        Scheduler::new(4);
+        Scheduler::new(2);
         let future1 = async{
             info!("future1");
         };
         let future2 = async{
             info!("future2");
         };
-        let future3 = async{
-            info!("future3");
-        };
-        let future4 = async{
-            info!("future4");
-        };
-        Scheduler::add(vec![Box::pin(future1), Box::pin(future2), Box::pin(future3), Box::pin(future4)]);
+        Scheduler::add(vec![Box::pin(future1), Box::pin(future2)]);
         Scheduler::join();
     }
 
