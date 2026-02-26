@@ -325,7 +325,7 @@ mod tests{
             info!("future4");
         };
         Scheduler::add(vec![Box::pin(future1), Box::pin(future2), Box::pin(future3), Box::pin(future4)]);
-        Scheduler::close();
+        Scheduler::join();
     }
 
     #[test]
@@ -348,7 +348,7 @@ mod tests{
         };
         let l:Vec<Pin<Box<dyn Future<Output = ()> + Send+ 'static>>> =vec![Box::pin(future1), Box::pin(future4)];
         Scheduler::add(l);
-        Scheduler::close();
+        Scheduler::join();
     }
 
     #[test]
